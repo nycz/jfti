@@ -2,7 +2,7 @@ import enum
 from pathlib import Path
 import struct
 import sys
-from typing import BinaryIO, Iterable, Optional
+from typing import BinaryIO, cast, Iterable, Optional
 import xml.etree.ElementTree as ET
 
 
@@ -110,7 +110,15 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
             size = packed & 0b111
             f.seek(3 * 2 ** (size + 1), 1)
 
-    with fname.open('rb') as f:
+    def skip_sub_blocks(f: BinaryIO) -> None:
+        while True:
+            size = f.read(1)[0]
+            if size == 0:
+                break
+            f.seek(size, 1)
+
+    with fname.open('rb') as raw_f:
+        f = cast(BinaryIO, raw_f)
         prefix = f.read(6)
         if prefix == b'GIF87a':
             raise ImageError('gif version 87a not supported')
@@ -118,31 +126,23 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
             raise ImageError(f'unknown gif version: {prefix[3:]}')
         elif prefix != b'GIF89a':
             raise ImageError('not a gif')
-        w, h, packed = struct.unpack('<HHB', f.read(5))
         # skip last two bytes in logical screen descriptor
-        f.seek(2, 1)
+        w, h, packed = struct.unpack('<HHBxx', f.read(7))
         skip_color_table(f, packed)
+        TEXT = 0x01
+        GCE = 0xf9
+        COMMENT = 0xfe
+        APP = 0xff
         while True:
             label = f.read(2)
             if len(label) == 0:
                 break
             # Extension block
             if label[0] == 0x21:
-                if label[1] == 0xf9:
-                    # Graphic control extension
-                    size = f.read(1)[0]
-                    assert size == 4
-                    f.seek(size, 1)
-                    assert f.read(1)[0] == 0
-                elif label[1] == 0xfe:
-                    # Comment extension
-                    comment = b''
-                    while True:
-                        size = f.read(1)[0]
-                        if size == 0:
-                            break
-                        comment += f.read(size)
-                elif label[1] == 0xff:
+                if label[1] in {TEXT, GCE, COMMENT}:
+                    # Skip irrelevant parts
+                    skip_sub_blocks(f)
+                elif label[1] == APP:
                     # Application extension
                     assert f.read(1)[0] == 11
                     app_id = f.read(8)
@@ -160,15 +160,6 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
                             data += f.read(size)
                     if is_xmp:
                         yield from get_xmp_tags(data[:-257])
-                elif label[1] == 0x01:
-                    # Plain text extension
-                    assert f.read(1)[0] == 12
-                    f.seek(12, 1)
-                    while True:
-                        size = f.read(1)[0]
-                        if size == 0:
-                            break
-                        f.seek(size, 1)
                 else:
                     print('UNK ext', hex(label[1]))
             elif label[0] == 0x2c:
@@ -177,11 +168,7 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
                 skip_color_table(f, packed)
                 # Skip LZW min code size
                 f.seek(1, 1)
-                while True:
-                    size = f.read(1)[0]
-                    if size == 0:
-                        break
-                    f.seek(size, 1)
+                skip_sub_blocks(f)
             elif label[0] == 0x3b:
                 shit = f.read(10)
                 if len(shit) > 0:
