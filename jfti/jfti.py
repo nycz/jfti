@@ -1,12 +1,34 @@
+import enum
 from pathlib import Path
 import struct
 import sys
-from typing import Iterable, BinaryIO
+from typing import BinaryIO, Iterable, Optional
 import xml.etree.ElementTree as ET
 
 
 class ImageError(Exception):
     pass
+
+
+class ImageFormat(enum.Enum):
+    GIF = enum.auto()
+    JPEG = enum.auto()
+    PNG = enum.auto()
+
+
+def identify_image_format(fname: Path) -> Optional[ImageFormat]:
+    with fname.open('rb') as f:
+        data = f.read(8)
+    if data == b'\x89PNG\x0d\x0a\x1a\x0a':
+        return ImageFormat.PNG
+    elif data[:2] == b'\xff\xd8':
+        return ImageFormat.JPEG
+    elif data[:3] == b'GIF':
+        if data[3:6] == b'89a':
+            return ImageFormat.GIF
+        else:
+            raise ImageError(f'Unsupported GIF format: {data[3:6]}')
+    return None
 
 
 def get_xmp_tags(data: bytes) -> Iterable[str]:
@@ -171,15 +193,18 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
 
 
 def print_tags(fname: Path) -> None:
-    # TODO: check for magic data instead
-    if fname.suffix.lower() == '.png':
-        print(', '.join(list(read_png_tags(fname))))
-    elif fname.suffix.lower() == '.jpg':
-        print(', '.join(list(read_jpeg_tags(fname))))
-    elif fname.suffix.lower() == '.gif':
-        print(', '.join(list(read_gif_tags(fname))))
-    else:
-        sys.exit('unsupported file format')
+    formats = {
+        ImageFormat.GIF: read_gif_tags,
+        ImageFormat.JPEG: read_jpeg_tags,
+        ImageFormat.PNG: read_png_tags,
+    }
+    try:
+        fmt = identify_image_format(fname)
+    except ImageError as e:
+        sys.exit(str(e))
+    if fmt is None:
+        sys.exit('Unsupported file format')
+    print(', '.join(list(formats[fmt](fname))))
 
 
 if __name__ == '__main__':
