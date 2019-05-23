@@ -2,7 +2,7 @@ import enum
 from pathlib import Path
 import struct
 import sys
-from typing import BinaryIO, cast, Iterable, Optional
+from typing import BinaryIO, cast, Iterable, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 
@@ -17,7 +17,7 @@ class ImageFormat(enum.Enum):
 
 
 def identify_image_format(fname: Path) -> Optional[ImageFormat]:
-    with fname.open('rb') as f:
+    with open(fname, 'rb') as f:
         data = f.read(8)
     if data == b'\x89PNG\x0d\x0a\x1a\x0a':
         return ImageFormat.PNG
@@ -44,7 +44,7 @@ def get_xmp_tags(data: bytes) -> Iterable[str]:
 
 def read_png_tags(fname: Path) -> Iterable[str]:
     chunks = []
-    with fname.open('rb') as f:
+    with open(fname, 'rb') as f:
         prefix = f.read(8)
         if prefix != b'\x89PNG\x0d\x0a\x1a\x0a':
             raise ImageError('not a png')
@@ -52,7 +52,7 @@ def read_png_tags(fname: Path) -> Iterable[str]:
             length_bytes = f.read(4)
             if len(length_bytes) == 0:
                 break
-            length = struct.unpack('>I', length_bytes)[0]
+            length = cast(Tuple[int], struct.unpack('>I', length_bytes))[0]
             type_ = f.read(4)
             if type_ == b'IEND':
                 break
@@ -70,7 +70,7 @@ def read_png_tags(fname: Path) -> Iterable[str]:
 
 
 def read_jpeg_tags(fname: Path) -> Iterable[str]:
-    with fname.open('rb') as f:
+    with open(fname, 'rb') as f:
         prefix = f.read(2)
         if prefix != b'\xff\xd8':
             raise ImageError('not a jpg')
@@ -88,7 +88,7 @@ def read_jpeg_tags(fname: Path) -> Iterable[str]:
                 buf = new_buf = b''
                 continue
             if buf + new_buf == b'\xff\xe1':
-                length = struct.unpack('>H', f.read(2))[0]
+                length = cast(Tuple[int], struct.unpack('>H', f.read(2)))[0]
                 data = f.read(length - 2)
                 if data[:sig_len] == start_signature:
                     yield from get_xmp_tags(data[sig_len:])
@@ -97,18 +97,17 @@ def read_jpeg_tags(fname: Path) -> Iterable[str]:
                 if maybe_length[0] == 0xff:
                     f.seek(-2, 1)
                     continue
-                length = struct.unpack('>H', maybe_length)[0]
+                length = cast(Tuple[int], struct.unpack('>H', maybe_length))[0]
                 if length:
                     f.seek(length - 2, 1)
-    return []
 
 
 def read_gif_tags(fname: Path) -> Iterable[str]:
     def skip_color_table(f: BinaryIO, packed_data: int) -> None:
-        has_color_table = packed >> 7
+        has_color_table = packed_data >> 7
         if has_color_table:
-            size = packed & 0b111
-            f.seek(3 * 2 ** (size + 1), 1)
+            size = packed_data & 0b111
+            f.seek(3 * cast(int, 2 ** (size + 1)), 1)
 
     def skip_sub_blocks(f: BinaryIO) -> None:
         while True:
@@ -117,8 +116,7 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
                 break
             f.seek(size, 1)
 
-    with fname.open('rb') as raw_f:
-        f = cast(BinaryIO, raw_f)
+    with open(fname, 'rb') as f:
         prefix = f.read(6)
         if prefix == b'GIF87a':
             raise ImageError('gif version 87a not supported')
@@ -127,7 +125,8 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
         elif prefix != b'GIF89a':
             raise ImageError('not a gif')
         # skip last two bytes in logical screen descriptor
-        w, h, packed = struct.unpack('<HHBxx', f.read(7))
+        w, h, packed = cast(Tuple[int, int, int],
+                            struct.unpack('<HHBxx', f.read(7)))
         skip_color_table(f, packed)
         TEXT = 0x01
         GCE = 0xf9
@@ -164,7 +163,8 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
                     print('UNK ext', hex(label[1]))
             elif label[0] == 0x2c:
                 f.seek(-1, 1)
-                x, y, w, h, packed = struct.unpack('<HHHHB', f.read(9))
+                x, y, w, h, packed = cast(Tuple[int, int, int, int, int],
+                                          struct.unpack('<HHHHB', f.read(9)))
                 skip_color_table(f, packed)
                 # Skip LZW min code size
                 f.seek(1, 1)
@@ -176,7 +176,6 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
                 break
             else:
                 print('UNK', hex(label[0]))
-    return []
 
 
 def print_tags(fname: Path) -> None:
