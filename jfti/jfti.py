@@ -1,13 +1,29 @@
 import enum
 from pathlib import Path
+import re
 import struct
 import sys
-from typing import BinaryIO, cast, Iterable, Optional, Tuple
+from typing import (BinaryIO, cast, Dict, Iterable,
+                    List, NamedTuple, Optional, Set, Tuple)
+import uuid
 import xml.etree.ElementTree as ET
+import zlib
 
 
 class ImageError(Exception):
     pass
+
+
+NS = {'x': 'adobe:ns:meta/',
+      'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+      'dc': 'http://purl.org/dc/elements/1.1/'}
+
+for prefix, uri in NS.items():
+    ET.register_namespace(prefix, uri)
+
+
+PNG_XMP_SIG = b'XML:com.adobe.xmp\x00\x00\x00\x00\x00'
+PNG_TYPE = b'iTXt'
 
 
 class ImageFormat(enum.Enum):
@@ -31,42 +47,155 @@ def identify_image_format(fname: Path) -> Optional[ImageFormat]:
     return None
 
 
-def get_xmp_tags(data: bytes) -> Iterable[str]:
-    ns = {'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-          'dc': 'http://purl.org/dc/elements/1.1/'}
-    xml = ET.fromstring(data.decode())
+def get_xmp_tags(raw_data: bytes) -> Iterable[str]:
+    data = raw_data.decode()
+    xml = ET.fromstring(data)
+    # TODO: handle missing xmpmeta
     keyword_bag = xml.find('rdf:RDF/rdf:Description'
-                           '/dc:subject/rdf:Bag', ns)
+                           '/dc:subject/rdf:Bag', NS)
     for keyword in keyword_bag or []:
         if keyword.text:
             yield keyword.text
 
 
-def read_png_tags(fname: Path) -> Iterable[str]:
-    chunks = []
-    with open(fname, 'rb') as f:
-        prefix = f.read(8)
-        if prefix != b'\x89PNG\x0d\x0a\x1a\x0a':
-            raise ImageError('not a png')
-        for _ in range(200):
-            length_bytes = f.read(4)
-            if len(length_bytes) == 0:
-                break
-            length = cast(Tuple[int], struct.unpack('>I', length_bytes))[0]
-            type_ = f.read(4)
-            if type_ == b'IEND':
-                break
-            data = f.read(length)
-            crc = f.read(4)
-            chunks.append((type_, length, crc, data))
+def create_xmp_chunk(tags: Set[str]) -> bytes:
+    root = ET.Element('x:xmpmeta',
+                      attrib={'xmlns:' + k: v for k, v in NS.items()})
+    paths: List[Tuple[str, Dict[str, str]]] = [
+        ('rdf:RDF', {}),
+        ('rdf:Description', {'rdf:about': ''}),
+        ('dc:subject', {}),
+        ('rdf:Bag', {})
+    ]
+    parent = root
+    indent = '\n'
+    for tag, attribs in paths:
+        parent.text = indent + ' '
+        parent = ET.SubElement(parent, tag, attrib=attribs)
+        parent.tail = indent
+        indent += ' '
+    parent.text = indent + ' '
+    for n, tag in enumerate(sorted(tags)):
+        tag_elem = ET.SubElement(parent, 'rdf:li')
+        tag_elem.text = tag
+        tag_elem.tail = indent + (' ' if n < len(tags) - 1 else '')
+    guid = uuid.uuid4().hex
+    xpacket_start = f'<?xpacket begin="" id="{guid}"?>\n'
+    xpacket_end = '\n<?xpacket end="w"?>'
+    padding: str = 20 * ('\n' + ' ' * 99)
+    out = ''.join([xpacket_start, ET.tostring(root, encoding='unicode'),
+                   padding, xpacket_end]).encode('utf-8')
+    return out
 
-    start_signature = b'XML:com.adobe.xmp\x00\x00\x00\x00\x00'
-    sig_len = len(start_signature)
-    for type_, length, crc, data in chunks:
-        if type_ != b'iTXt':
-            continue
-        if data[:sig_len] == start_signature:
-            yield from get_xmp_tags(data[sig_len:])
+
+def set_xmp_tags(raw_data: bytes, tags: Set[str]) -> bytes:
+    data = raw_data.decode()
+    xml = ET.fromstring(data)
+    paths: List[Tuple[str, Dict[str, str]]] = [
+        ('rdf:RDF', {}),
+        ('rdf:Description', {'rdf:about': ''}),
+        ('dc:subject', {}),
+        ('rdf:Bag', {})
+    ]
+    xpacket_start = re.match(r'<\?xpacket [^>]+\?>', data)
+    xpacket_end = re.search(r'<\?xpacket end=["\'][rw]["\']\?>$', data)
+    assert xpacket_start is not None and xpacket_end is not None
+    parent = xml
+    for tag, attribs in paths:
+        child = parent.find(tag, NS)
+        if child is None:
+            parent = ET.SubElement(parent, tag, attrib=attribs)
+        else:
+            parent = child
+    for keyword in list(parent):
+        parent.remove(keyword)
+    indent = '\n ' + ' ' * len(paths)
+    for tag in sorted(tags):
+        tag_elem = ET.SubElement(parent, 'rdf:li')
+        tag_elem.text = tag
+        tag_elem.tail = indent
+    if len(parent) > 0:
+        parent[-1].tail = indent[:-1]
+    out_xml = ET.tostring(xml, encoding='unicode')
+    out = '\n'.join([xpacket_start[0], out_xml]).encode()
+    end = b'\n' + xpacket_end[0].encode()
+    padding_len = max(0, len(raw_data) - (len(out) + len(end)))
+    padding = b''
+    for n in range(0, padding_len, 100):
+        padding += b'\n' + b' ' * 99
+    out += padding[:padding_len] + end
+    return out
+
+
+class PNGChunk(NamedTuple):
+    pos: int
+    data: bytes
+
+
+def parse_png(f: BinaryIO) -> Tuple[int, List[PNGChunk]]:
+    prefix = f.read(8)
+    if prefix != b'\x89PNG\x0d\x0a\x1a\x0a':
+        raise ImageError('not a png')
+    block_pos: int
+    chunks = []
+    first_pos: int = -1
+    while True:
+        block_pos = f.tell()
+        length_bytes = f.read(4)
+        if len(length_bytes) == 0:
+            break
+        length = cast(Tuple[int], struct.unpack('>I', length_bytes))[0]
+        type_ = f.read(4)
+        if type_ == b'IEND':
+            break
+        data = f.read(length)
+        crc = cast(Tuple[int], struct.unpack('>I', f.read(4)))[0]
+        assert crc == zlib.crc32(type_ + data)
+        if type_ == PNG_TYPE and data[:len(PNG_XMP_SIG)] == PNG_XMP_SIG:
+            chunks.append(PNGChunk(block_pos, data))
+        if first_pos < 0:
+            first_pos = f.tell()
+    return first_pos, chunks
+
+
+def read_png_tags(fname: Path) -> Iterable[str]:
+    with open(fname, 'rb') as f:
+        _, chunks = parse_png(f)
+        for pos, data in chunks:
+            yield from get_xmp_tags(data[len(PNG_XMP_SIG):])
+
+
+def set_png_tags(fname: Path, tags: Set[str]) -> None:
+    with open(fname, 'r+b') as f:
+        start_pos, chunks = parse_png(f)
+        if len(chunks) == 1:
+            pos, data = chunks[0]
+            new_data = PNG_XMP_SIG + set_xmp_tags(data[len(PNG_XMP_SIG):],
+                                                  tags)
+            if len(new_data) != len(data):
+                new_crc = zlib.crc32(PNG_TYPE + new_data)
+                f.seek(pos + 8 + len(data) + 4)
+                trailing_data = f.read()
+                f.seek(pos)
+                f.write(struct.pack('>I', len(new_data)))
+                f.write(PNG_TYPE + new_data)
+                f.write(struct.pack('>I', new_crc))
+                f.write(trailing_data)
+            elif new_data != data:
+                new_crc = zlib.crc32(PNG_TYPE + new_data)
+                f.seek(pos + 8)
+                f.write(new_data)
+                f.write(struct.pack('>I', new_crc))
+        elif not chunks:
+            f.seek(start_pos)
+            trailing_data = f.read()
+            f.seek(start_pos)
+            xml = PNG_XMP_SIG + create_xmp_chunk(tags)
+            f.write(struct.pack('>I', len(xml)))
+            f.write(PNG_TYPE + xml)
+            crc = zlib.crc32(PNG_TYPE + xml)
+            f.write(struct.pack('>I', crc))
+            f.write(trailing_data)
 
 
 def read_jpeg_tags(fname: Path) -> Iterable[str]:
@@ -180,9 +309,10 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
 
 def print_tags(fname: Path) -> None:
     formats = {
-        ImageFormat.GIF: read_gif_tags,
-        ImageFormat.JPEG: read_jpeg_tags,
-        ImageFormat.PNG: read_png_tags,
+        # ImageFormat.GIF: read_gif_tags,
+        # ImageFormat.JPEG: read_jpeg_tags,
+        # ImageFormat.PNG: read_png_tags,
+        ImageFormat.PNG: set_png_tags,
     }
     try:
         fmt = identify_image_format(fname)
@@ -190,7 +320,8 @@ def print_tags(fname: Path) -> None:
         sys.exit(str(e))
     if fmt is None:
         sys.exit('Unsupported file format')
-    print(', '.join(list(formats[fmt](fname))))
+    formats[fmt](fname, set(['nah', 'lolololo']))
+    # print(', '.join(list(formats[fmt](fname))))
 
 
 if __name__ == '__main__':
