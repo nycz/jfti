@@ -24,6 +24,7 @@ for prefix, uri in NS.items():
 
 PNG_XMP_SIG = b'XML:com.adobe.xmp\x00\x00\x00\x00\x00'
 PNG_TYPE = b'iTXt'
+JPEG_XMP_SIG = b'http://ns.adobe.com/xap/1.0/\x00'
 
 
 class ImageFormat(enum.Enum):
@@ -199,37 +200,92 @@ def set_png_tags(fname: Path, tags: Set[str]) -> None:
             f.write(trailing_data)
 
 
+def parse_jpeg(f: BinaryIO) -> Tuple[Optional[int], Optional[int],
+                                     Optional[Tuple[int, bytes]]]:
+    prefix = f.read(2)
+    if prefix != b'\xff\xd8':
+        raise ImageError('not a jpg')
+    buf = b''
+    first_sof_pos: Optional[int] = None
+    last_exif_pos: Optional[int] = None
+    while True:
+        new_buf = f.read(1)
+        # 0xD9 is the ending marker
+        if len(new_buf) == 0 or buf + new_buf == b'\xff\xd9':
+            break
+        if new_buf == b'\xff':
+            buf = new_buf
+            continue
+        if buf == b'\xff' and new_buf in {b'\xc0', b'\xc2'} \
+                and first_sof_pos is None:
+            first_sof_pos = f.tell() - 2
+        if buf + new_buf == b'\xff\x00':
+            buf = new_buf = b''
+            continue
+        if buf + new_buf == b'\xff\xe1':
+            start_pos = f.tell()
+            length = cast(Tuple[int], struct.unpack('>H', f.read(2)))[0]
+            data = f.read(length - 2)
+            if data[:6] == b'Exif\x00\x00':
+                # Find the last exif block
+                last_exif_pos = f.tell()
+            elif data[:len(JPEG_XMP_SIG)] == JPEG_XMP_SIG:
+                # TODO: extended xmp?
+                return first_sof_pos, last_exif_pos, (start_pos, data)
+        else:
+            maybe_length = f.read(2)
+            if maybe_length[0] == 0xff:
+                f.seek(-len(maybe_length), 1)
+                continue
+            length = cast(Tuple[int], struct.unpack('>H', maybe_length))[0]
+            if length:
+                f.seek(length - 2, 1)
+    return first_sof_pos, last_exif_pos, None
+
+
 def read_jpeg_tags(fname: Path) -> Iterable[str]:
     with open(fname, 'rb') as f:
-        prefix = f.read(2)
-        if prefix != b'\xff\xd8':
-            raise ImageError('not a jpg')
-        buf = b''
-        start_signature = b'http://ns.adobe.com/xap/1.0/\x00'
-        sig_len = len(start_signature)
-        while True:
-            new_buf = f.read(1)
-            if len(new_buf) == 0:
-                break
-            if new_buf == b'\xff':
-                buf = new_buf
-                continue
-            if buf == b'\xff' and new_buf == b'\x00':
-                buf = new_buf = b''
-                continue
-            if buf + new_buf == b'\xff\xe1':
-                length = cast(Tuple[int], struct.unpack('>H', f.read(2)))[0]
-                data = f.read(length - 2)
-                if data[:sig_len] == start_signature:
-                    yield from get_xmp_tags(data[sig_len:])
+        _, _, payload = parse_jpeg(f)
+        if payload is not None:
+            yield from get_xmp_tags(payload[1][len(JPEG_XMP_SIG):])
+
+
+def set_jpeg_tags(fname: Path, tags: Set[str]) -> None:
+    with open(fname, 'r+b') as f:
+        first_sof_pos, last_exif_pos, payload = parse_jpeg(f)
+        if payload is not None:
+            start_pos, data = payload
+            new_data = JPEG_XMP_SIG + set_xmp_tags(data[len(JPEG_XMP_SIG):],
+                                                   tags)
+            if len(new_data) != len(data):
+                f.seek(start_pos)
+                trailing_data = f.read()
+                f.seek(start_pos)
+                f.truncate()
+                f.write(struct.pack('>H', len(new_data) + 2))
+                f.write(new_data)
+                f.write(trailing_data)
+            elif new_data != data:
+                f.seek(start_pos + 2)
+                f.write(new_data)
             else:
-                maybe_length = f.read(2)
-                if maybe_length[0] == 0xff:
-                    f.seek(-2, 1)
-                    continue
-                length = cast(Tuple[int], struct.unpack('>H', maybe_length))[0]
-                if length:
-                    f.seek(length - 2, 1)
+                print('no change')
+            return
+        else:
+            if last_exif_pos is not None:
+                start_pos = last_exif_pos
+            elif first_sof_pos is not None:
+                start_pos = first_sof_pos
+            else:
+                raise ImageError('Weird jpeg, can\'t find place to put XMP block')
+            f.seek(start_pos)
+            trailing_data = f.read()
+            f.seek(start_pos)
+            new_data = JPEG_XMP_SIG + create_xmp_chunk(tags)
+            f.write(b'\xff\xe1')
+            f.write(struct.pack('>H', len(new_data) + 2))
+            f.write(new_data)
+            f.write(trailing_data)
 
 
 def read_gif_tags(fname: Path) -> Iterable[str]:
@@ -308,12 +364,30 @@ def read_gif_tags(fname: Path) -> Iterable[str]:
                 print('UNK', hex(label[0]))
 
 
+def read_tags(fname: Path) -> Set[str]:
+    formats = {
+        ImageFormat.GIF: read_gif_tags,
+        ImageFormat.JPEG: read_jpeg_tags,
+        ImageFormat.PNG: read_png_tags,
+    }
+    try:
+        fmt = identify_image_format(fname)
+    except ImageError as e:
+        return set()
+    else:
+        if fmt is not None:
+            return set(formats[fmt](fname))
+        else:
+            return set()
+
+
 def print_tags(fname: Path) -> None:
     formats = {
         # ImageFormat.GIF: read_gif_tags,
         # ImageFormat.JPEG: read_jpeg_tags,
         # ImageFormat.PNG: read_png_tags,
         ImageFormat.PNG: set_png_tags,
+        ImageFormat.JPEG: set_jpeg_tags,
     }
     try:
         fmt = identify_image_format(fname)
