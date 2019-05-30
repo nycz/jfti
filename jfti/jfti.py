@@ -48,7 +48,8 @@ def identify_image_format(fname: Path) -> Optional[ImageFormat]:
 
 
 def get_xmp_tags(raw_data: bytes) -> Iterable[str]:
-    data = raw_data.decode()
+    # Sometimes there can be weird null bytes at the end
+    data = raw_data.decode().rstrip('\x00')
     xml = ET.fromstring(data)
     # TODO: handle missing xmpmeta
     keyword_bag = xml.find('rdf:RDF/rdf:Description'
@@ -89,7 +90,7 @@ def create_xmp_chunk(tags: Set[str]) -> bytes:
 
 
 def set_xmp_tags(raw_data: bytes, tags: Set[str]) -> bytes:
-    data = raw_data.decode()
+    data = raw_data.decode().rstrip('\x00')
     xml = ET.fromstring(data)
     paths: List[Tuple[str, Dict[str, str]]] = [
         ('rdf:RDF', {}),
