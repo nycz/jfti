@@ -239,6 +239,9 @@ def jpeg_dimensions(fname: Path) -> Tuple[int, int]:
                 buf = new_buf = b''
                 continue
             maybe_length = f.read(2)
+            if len(maybe_length) < 2:
+                sys.stderr.write('Warning: premature end to image\n')
+                break
             if maybe_length[0] == 0xff:
                 f.seek(-len(maybe_length), 1)
                 continue
@@ -274,6 +277,8 @@ def parse_jpeg(f: BinaryIO) -> Tuple[Optional[int], Optional[int],
             start_pos = f.tell()
             length = cast(Tuple[int], struct.unpack('>H', f.read(2)))[0]
             data = f.read(length - 2)
+            if len(data) != length - 2:
+                sys.stderr.write('Warning: possibly corrupt jpg section\n')
             if data[:6] == b'Exif\x00\x00':
                 # Find the last exif block
                 last_exif_pos = f.tell()
@@ -282,6 +287,9 @@ def parse_jpeg(f: BinaryIO) -> Tuple[Optional[int], Optional[int],
                 return first_sof_pos, last_exif_pos, (start_pos, data)
         else:
             maybe_length = f.read(2)
+            if len(maybe_length) < 2:
+                sys.stderr.write('Warning: premature end to image\n')
+                break
             if maybe_length[0] == 0xff:
                 f.seek(-len(maybe_length), 1)
                 continue
