@@ -72,6 +72,11 @@ class TestPNG(unittest.TestCase):
         new_tags = frozenset(jfti.read_png_tags(img_path))
         self.assertEqual(tags, new_tags)
 
+    @on_all_images
+    def test_dimensions(self, old_img, img_path):
+        dimensions = jfti.png_dimensions(img_path)
+        self.assertEqual(old_img.size, dimensions)
+
     def tearDown(self):
         self.tmpdir.cleanup()
 
@@ -130,8 +135,15 @@ class TestJPEG(unittest.TestCase):
         new_tags = frozenset(jfti.read_jpeg_tags(img_path))
         self.assertEqual(tags, new_tags)
 
+    @on_all_images
+    def test_dimensions(self, old_img, img_path):
+        dimensions = jfti.jpeg_dimensions(img_path)
+        self.assertEqual(old_img.size, dimensions)
+
     def tearDown(self):
         self.tmpdir.cleanup()
+
+
 
 
 if __name__ == '__main__':

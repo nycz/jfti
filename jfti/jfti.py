@@ -129,6 +129,20 @@ def set_xmp_tags(raw_data: bytes, tags: Set[str]) -> bytes:
     return out
 
 
+def png_dimensions(fname: Path) -> Tuple[int, int]:
+    with open(fname, 'rb') as f:
+        prefix = f.read(8)
+        if prefix != b'\x89PNG\x0d\x0a\x1a\x0a':
+            raise ImageError('not a png')
+        # Skip IHDR length
+        f.seek(4, 1)
+        if f.read(4) != b'IHDR':
+            raise ImageError('corrupted png')
+        width, height = cast(Tuple[int, int],
+                             struct.unpack('>II', f.read(8)))
+        return width, height
+
+
 class PNGChunk(NamedTuple):
     pos: int
     data: bytes
@@ -198,6 +212,40 @@ def set_png_tags(fname: Path, tags: Set[str]) -> None:
             crc = zlib.crc32(PNG_TYPE + xml)
             f.write(struct.pack('>I', crc))
             f.write(trailing_data)
+
+
+def jpeg_dimensions(fname: Path) -> Tuple[int, int]:
+    sof_markers = {b'\xc0', b'\xc1', b'\xc2', b'\xc3'}
+    with open(fname, 'rb') as f:
+        prefix = f.read(2)
+        if prefix != b'\xff\xd8':
+            raise ImageError('not a jpg')
+        buf = b''
+        while True:
+            new_buf = f.read(1)
+            # 0xD9 is the ending marker
+            if len(new_buf) == 0 or buf + new_buf == b'\xff\xd9':
+                break
+            if new_buf == b'\xff':
+                buf = new_buf
+                continue
+            if buf == b'\xff' and new_buf in sof_markers:
+                # Skip size and bit depth
+                f.seek(3, 1)
+                height, width = cast(Tuple[int, int],
+                                     struct.unpack('>HH', f.read(4)))
+                return width, height
+            if buf + new_buf == b'\xff\x00':
+                buf = new_buf = b''
+                continue
+            maybe_length = f.read(2)
+            if maybe_length[0] == 0xff:
+                f.seek(-len(maybe_length), 1)
+                continue
+            length = cast(Tuple[int], struct.unpack('>H', maybe_length))[0]
+            if length:
+                f.seek(length - 2, 1)
+    return -1, -1
 
 
 def parse_jpeg(f: BinaryIO) -> Tuple[Optional[int], Optional[int],
@@ -379,6 +427,22 @@ def read_tags(fname: Path) -> Set[str]:
             return set(formats[fmt](fname))
         else:
             return set()
+
+
+def dimensions(fname: Path) -> Tuple[int, int]:
+    formats = {
+        ImageFormat.JPEG: jpeg_dimensions,
+        ImageFormat.PNG: png_dimensions,
+    }
+    try:
+        fmt = identify_image_format(fname)
+    except ImageError:
+        return -1, -1
+    else:
+        if fmt is not None:
+            return formats[fmt](fname)
+        else:
+            return -1, -1
 
 
 def print_tags(fname: Path) -> None:
