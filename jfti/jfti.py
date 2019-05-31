@@ -1,12 +1,17 @@
 import enum
 from pathlib import Path
 import re
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 from typing import (BinaryIO, cast, Dict, Iterable,
                     List, NamedTuple, Optional, Set, Tuple)
 import uuid
 import zlib
+
+from PIL import Image
 
 from lxml import etree
 from lxml.builder import ElementMaker
@@ -95,7 +100,7 @@ def set_xmp_tags(raw_data: bytes, tags: Set[str]) -> bytes:
         del paths[0]
     desc_abouts = set()
     for desc in xml.xpath('/' + '/'.join(paths[:-2]), namespaces=NS):
-        about = desc.attrib.get(about_key)
+        about = desc.attrib.get(about_key, '')
         if about.strip():
             desc_abouts.add(about)
     parent = xml
@@ -437,6 +442,64 @@ def read_tags(fname: Path) -> Set[str]:
             return set()
 
 
+def set_tags(fname: Path, tags: Set[str], safe: bool = True) -> None:
+    # - get xmp/iptc/exif data from exiv2
+    # - load image into memory
+    # - copy file to tmp
+    # - run set_*_tags on copy
+    # - get xmp/iptc/exif/image data and compare
+    # - copy file back to original path
+    def get_metadata(path: Path) -> List[str]:
+        try:
+            result = subprocess.run(['exiv2', '-p', 'a', str(path)],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    check=True, encoding='utf-8')
+        except subprocess.CalledProcessError as e:
+            raise ImageError(f'running exiv2 failed!\nstdout: {e.stdout!r}'
+                             f'\nstderr: {e.stderr!r}')
+        else:
+            return [x for x in result.stdout.splitlines()
+                    if not x.startswith('Xmp.dc.subject ')]
+
+    def get_pixeldata(path: Path) -> List[Tuple[int, ...]]:
+        return list(Image.open(str(path)).getdata())
+
+    set_tags_funcs = {
+        ImageFormat.PNG: set_png_tags,
+        ImageFormat.JPEG: set_jpeg_tags,
+    }
+    fmt = identify_image_format(fname)
+    if fmt is None:
+        raise ImageError('unknown file format')
+
+    old_meta = get_metadata(fname)
+    old_image = get_pixeldata(fname)
+
+    with tempfile.TemporaryDirectory(prefix='jfti-inprogress-') as tempdir:
+        # Copy file to safe temporary place
+        new_file = shutil.copy(str(fname), tempdir)
+        # Set the tags
+        set_tags_funcs[fmt](new_file, tags)
+        # Get the data and check it
+        new_meta = get_metadata(new_file)
+        new_image = get_pixeldata(new_file)
+        if new_meta != old_meta:
+            if sorted(new_meta) == sorted(old_meta):
+                raise ImageError('metadata out of order!')
+            new_lines = set(new_meta) - set(old_meta)
+            dropped_lines = set(old_meta) - set(new_meta)
+            raise ImageError(f'metadata do not match!\n'
+                             f'added lines: {new_lines!r}\n'
+                             f'removed lines: {dropped_lines!r}')
+        if new_image != old_image:
+            print(list(new_image)[0])
+            print(type(list(new_image)[0]))
+            print(len(new_image))
+            print(len(old_image))
+            raise ImageError('pixel data do not match!')
+        shutil.copy(new_file, str(fname))
+
+
 def dimensions(fname: Path) -> Tuple[int, int]:
     formats = {
         ImageFormat.JPEG: jpeg_dimensions,
@@ -455,11 +518,9 @@ def dimensions(fname: Path) -> Tuple[int, int]:
 
 def print_tags(fname: Path) -> None:
     formats = {
-        # ImageFormat.GIF: read_gif_tags,
-        # ImageFormat.JPEG: read_jpeg_tags,
-        # ImageFormat.PNG: read_png_tags,
-        ImageFormat.PNG: set_png_tags,
-        ImageFormat.JPEG: set_jpeg_tags,
+        ImageFormat.GIF: read_gif_tags,
+        ImageFormat.JPEG: read_jpeg_tags,
+        ImageFormat.PNG: read_png_tags,
     }
     try:
         fmt = identify_image_format(fname)
@@ -467,9 +528,28 @@ def print_tags(fname: Path) -> None:
         sys.exit(str(e))
     if fmt is None:
         sys.exit('Unsupported file format')
-    formats[fmt](fname, set(['nah', 'lolololo']))
-    # print(', '.join(list(formats[fmt](fname))))
+    print(', '.join(list(formats[fmt](fname))))
+
+
+def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('file')
+    parser.add_argument('action', choices=('set', 'ls'))
+    parser.add_argument('tag', nargs='*')
+    args = parser.parse_args()
+    path = Path(args.file).expanduser()
+    if args.action == 'ls':
+        if args.tag:
+            raise argparse.ArgumentError('dont specify tags when listing')
+        print_tags(path)
+    elif args.action == 'set':
+        if not args.tag:
+            raise argparse.ArgumentError('no tags specified (no you cant '
+                                         'get rid of all of them yet)')
+        # print(set(args.tag))
+        set_tags(path, set(args.tag))
 
 
 if __name__ == '__main__':
-    print_tags(Path(sys.argv[1]).expanduser())
+    main()
