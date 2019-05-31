@@ -6,8 +6,10 @@ import sys
 from typing import (BinaryIO, cast, Dict, Iterable,
                     List, NamedTuple, Optional, Set, Tuple)
 import uuid
-import xml.etree.ElementTree as ET
 import zlib
+
+from lxml import etree
+from lxml.builder import ElementMaker
 
 
 class ImageError(Exception):
@@ -15,11 +17,13 @@ class ImageError(Exception):
 
 
 NS = {'x': 'adobe:ns:meta/',
+      'xmp': 'http://ns.adobe.com/xap/1.0/',
+      'xmpRights': 'http://ns.adobe.com/xap/1.0/rights/',
+      'xmpMM': 'http://ns.adobe.com/xap/1.0/mm/',
+      'xmpidq': 'http://ns.adobe.com/xmp/Identifier/qual/1.0/',
+      'stRef': 'http://ns.adobe.com/xap/1.0/sType/ResourceRef#',
       'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
       'dc': 'http://purl.org/dc/elements/1.1/'}
-
-for prefix, uri in NS.items():
-    ET.register_namespace(prefix, uri)
 
 
 PNG_XMP_SIG = b'XML:com.adobe.xmp\x00\x00\x00\x00\x00'
@@ -51,81 +55,77 @@ def identify_image_format(fname: Path) -> Optional[ImageFormat]:
 def get_xmp_tags(raw_data: bytes) -> Iterable[str]:
     # Sometimes there can be weird null bytes at the end
     data = raw_data.decode().rstrip('\x00')
-    xml = ET.fromstring(data)
-    # TODO: handle missing xmpmeta
-    keyword_bag = xml.find('rdf:RDF/rdf:Description'
-                           '/dc:subject/rdf:Bag', NS)
-    for keyword in keyword_bag or []:
-        if keyword.text:
-            yield keyword.text
+    xml = etree.fromstring(data)
+    if xml is None:
+        return []
+    yield from ((x.text or '').strip() for x
+                in xml.xpath('//rdf:RDF/rdf:Description/dc:subject'
+                             '/rdf:Bag/rdf:li', namespaces=NS)
+                if (x.text or '').strip())
 
 
 def create_xmp_chunk(tags: Set[str]) -> bytes:
-    root = ET.Element('x:xmpmeta',
-                      attrib={'xmlns:' + k: v for k, v in NS.items()})
-    paths: List[Tuple[str, Dict[str, str]]] = [
-        ('rdf:RDF', {}),
-        ('rdf:Description', {'rdf:about': ''}),
-        ('dc:subject', {}),
-        ('rdf:Bag', {})
-    ]
-    parent = root
-    indent = '\n'
-    for tag, attribs in paths:
-        parent.text = indent + ' '
-        parent = ET.SubElement(parent, tag, attrib=attribs)
-        parent.tail = indent
-        indent += ' '
-    parent.text = indent + ' '
-    for n, tag in enumerate(sorted(tags)):
-        tag_elem = ET.SubElement(parent, 'rdf:li')
-        tag_elem.text = tag
-        tag_elem.tail = indent + (' ' if n < len(tags) - 1 else '')
+    Ex = ElementMaker(namespace=NS['x'], nsmap=NS)
+    Erdf = ElementMaker(namespace=NS['rdf'], nsmap=NS)
+    Edc = ElementMaker(namespace=NS['dc'], nsmap=NS)
+    tag_items = [Erdf.li(tag) for tag in sorted(tags)]
+    root = Ex.xmpmeta(
+        Erdf.RDF(
+            Erdf.Description(
+                Edc.subject(Erdf.Bag(*tag_items)),
+                **{f'{{{NS["rdf"]}}}about': ''})))
     guid = uuid.uuid4().hex
     xpacket_start = f'<?xpacket begin="" id="{guid}"?>\n'
     xpacket_end = '\n<?xpacket end="w"?>'
     padding: str = 20 * ('\n' + ' ' * 99)
-    out = ''.join([xpacket_start, ET.tostring(root, encoding='unicode'),
+    out = ''.join([xpacket_start, etree.tostring(root, pretty_print=True,
+                                                 encoding='unicode'),
                    padding, xpacket_end]).encode('utf-8')
     return out
 
 
 def set_xmp_tags(raw_data: bytes, tags: Set[str]) -> bytes:
+    rdf = '{' + NS['rdf'] + '}'
+    dc = '{' + NS['dc'] + '}'
+    about_key = rdf + 'about'
     data = raw_data.decode().rstrip('\x00')
-    xml = ET.fromstring(data)
-    paths: List[Tuple[str, Dict[str, str]]] = [
-        ('rdf:RDF', {}),
-        ('rdf:Description', {'rdf:about': ''}),
-        ('dc:subject', {}),
-        ('rdf:Bag', {})
-    ]
-    xpacket_start = re.match(r'<\?xpacket [^>]+\?>', data)
-    xpacket_end = re.search(r'<\?xpacket end=["\'][rw]["\']\?>$', data)
-    assert xpacket_start is not None and xpacket_end is not None
+    xml = etree.fromstring(data)
+    paths = ['x:xmpmeta', 'rdf:RDF', 'rdf:Description', 'dc:subject', 'rdf:Bag']
+    if xml.xpath(f'/{paths[1]}', namespaces=NS):
+        del paths[0]
+    desc_abouts = set()
+    for desc in xml.xpath('/' + '/'.join(paths[:-2]), namespaces=NS):
+        about = desc.attrib.get(about_key)
+        if about.strip():
+            desc_abouts.add(about)
     parent = xml
-    for tag, attribs in paths:
-        child = parent.find(tag, NS)
-        if child is None:
-            parent = ET.SubElement(parent, tag, attrib=attribs)
+    for i in range(len(paths)):
+        hits = xml.xpath('/' + '/'.join(paths[:i+1]), namespaces=NS)
+        if len(hits) == 0:
+            target = paths[i]
+            prefix, tag = target.split(':', 1)
+            fullname = '{' + NS[prefix] + '}' + tag
+            parent = etree.SubElement(parent, fullname)
+            if target == 'rdf:Description' and len(desc_abouts) == 1:
+                parent.set(about_key, list(desc_abouts)[0])
         else:
-            parent = child
-    for keyword in list(parent):
-        parent.remove(keyword)
-    indent = '\n ' + ' ' * len(paths)
+            parent = hits[0]
+    parent.clear()
     for tag in sorted(tags):
-        tag_elem = ET.SubElement(parent, 'rdf:li')
+        tag_elem = etree.SubElement(parent, rdf + 'li')
         tag_elem.text = tag
-        tag_elem.tail = indent
-    if len(parent) > 0:
-        parent[-1].tail = indent[:-1]
-    out_xml = ET.tostring(xml, encoding='unicode')
-    out = '\n'.join([xpacket_start[0], out_xml]).encode()
-    end = b'\n' + xpacket_end[0].encode()
-    padding_len = max(0, len(raw_data) - (len(out) + len(end)))
+
+    out_xml = etree.tostring(xml.getroottree(), pretty_print=True,
+                             encoding='unicode').strip()
+    if out_xml.endswith('?>'):
+        start, end = out_xml.rsplit('<?', 1)
+        end = '<?' + end
+
+    padding_len = max(0, len(raw_data) - len(out_xml.encode()))
     padding = b''
     for n in range(0, padding_len, 100):
         padding += b'\n' + b' ' * 99
-    out += padding[:padding_len] + end
+    out = start.encode() + padding[:padding_len] + end.encode()
     return out
 
 
