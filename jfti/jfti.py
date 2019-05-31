@@ -90,14 +90,21 @@ def create_xmp_chunk(tags: Set[str]) -> bytes:
 
 
 def set_xmp_tags(raw_data: bytes, tags: Set[str]) -> bytes:
+    x = '{' + NS['x'] + '}'
     rdf = '{' + NS['rdf'] + '}'
     dc = '{' + NS['dc'] + '}'
     about_key = rdf + 'about'
     data = raw_data.decode().rstrip('\x00')
     xml = etree.fromstring(data)
-    paths = ['x:xmpmeta', 'rdf:RDF', 'rdf:Description', 'dc:subject', 'rdf:Bag']
-    if xml.xpath(f'/{paths[1]}', namespaces=NS):
-        del paths[0]
+    paths = ['rdf:RDF', 'rdf:Description', 'dc:subject', 'rdf:Bag']
+    xapmeta = 'xapmeta'
+    xmpmeta = 'xmpmeta'
+    if xml.tag == x + xapmeta:
+        paths.insert(0, 'x:' + xapmeta)
+    elif xml.tag == x + xmpmeta:
+        paths.insert(0, 'x:' + xmpmeta)
+    elif xml.tag != rdf + 'RDF':
+        raise ImageError(f'Unrecognized root element: {xml.tag!r}')
     desc_abouts = set()
     for desc in xml.xpath('/' + '/'.join(paths[:-2]), namespaces=NS):
         about = desc.attrib.get(about_key, '')
