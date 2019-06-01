@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from PIL import Image
 import shutil
@@ -17,6 +18,8 @@ def on_all_images(func):
 
 
 TESTDATA_ROOT = Path('testdata')
+
+INCLUDE_SLOW = os.environ.get('INCLUDE_SLOW') == 'yes'
 
 
 class TestPNG(unittest.TestCase):
@@ -96,7 +99,7 @@ class TestJPEG(unittest.TestCase):
     def assertSameImage(self, img1: Image.Image, img2: Image.Image):
         self.assertEqual(list(img1.getdata()), list(img2.getdata()))
 
-    @unittest.skip
+    @unittest.skipUnless(INCLUDE_SLOW, 'skipping slow tests')
     @on_all_images
     def test_same_tags_unchanged_image(self, old_img, img_path):
         tags = set(jfti.read_jpeg_tags(img_path))
@@ -104,7 +107,7 @@ class TestJPEG(unittest.TestCase):
         new_img = Image.open(str(img_path))
         self.assertSameImage(old_img, new_img)
 
-    @unittest.skip
+    @unittest.skipUnless(INCLUDE_SLOW, 'skipping slow tests')
     @on_all_images
     def test_new_tags_unchanged_image(self, old_img, img_path):
         jfti.set_jpeg_tags(img_path, {'tag1', 'tag2', 'tag3'})
@@ -124,7 +127,7 @@ class TestJPEG(unittest.TestCase):
         new_tags = frozenset(jfti.read_jpeg_tags(img_path))
         self.assertEqual(frozenset(), new_tags)
 
-    @unittest.skip
+    @unittest.skipUnless(INCLUDE_SLOW, 'skipping slow tests')
     @on_all_images
     def test_overflow_tags_unchanged_image(self, old_img, img_path):
         tags = frozenset(str(x) * 10 for x in range(100))
