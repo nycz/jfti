@@ -36,6 +36,7 @@ class TestPNG(unittest.TestCase):
     def assertSameImage(self, img1: Image.Image, img2: Image.Image):
         self.assertEqual(list(img1.getdata()), list(img2.getdata()))
 
+    @unittest.skipUnless(INCLUDE_SLOW, 'skipping slow tests')
     @on_all_images
     def test_same_tags_unchanged_image(self, old_img, img_path):
         tags = set(jfti.read_png_tags(img_path))
@@ -43,6 +44,7 @@ class TestPNG(unittest.TestCase):
         new_img = Image.open(str(img_path))
         self.assertSameImage(old_img, new_img)
 
+    @unittest.skipUnless(INCLUDE_SLOW, 'skipping slow tests')
     @on_all_images
     def test_new_tags_unchanged_image(self, old_img, img_path):
         jfti.set_png_tags(img_path, {'tag1', 'tag2', 'tag3'})
@@ -62,16 +64,17 @@ class TestPNG(unittest.TestCase):
         new_tags = frozenset(jfti.read_png_tags(img_path))
         self.assertEqual(frozenset(), new_tags)
 
+    @unittest.skipUnless(INCLUDE_SLOW, 'skipping slow tests')
     @on_all_images
     def test_overflow_tags_unchanged_image(self, old_img, img_path):
-        tags = frozenset(str(x) * 10 for x in range(100))
+        tags = frozenset(str(x) * 10 for x in range(300))
         jfti.set_png_tags(img_path, set(tags))
         new_img = Image.open(str(img_path))
         self.assertSameImage(old_img, new_img)
 
     @on_all_images
     def test_overflow_tags(self, old_img, img_path):
-        tags = frozenset(str(x) * 10 for x in range(100))
+        tags = frozenset(str(x) * 10 for x in range(300))
         jfti.set_png_tags(img_path, set(tags))
         new_tags = frozenset(jfti.read_png_tags(img_path))
         self.assertEqual(tags, new_tags)
@@ -130,14 +133,14 @@ class TestJPEG(unittest.TestCase):
     @unittest.skipUnless(INCLUDE_SLOW, 'skipping slow tests')
     @on_all_images
     def test_overflow_tags_unchanged_image(self, old_img, img_path):
-        tags = frozenset(str(x) * 10 for x in range(100))
+        tags = frozenset(str(x) * 10 for x in range(300))
         jfti.set_jpeg_tags(img_path, set(tags))
         new_img = Image.open(str(img_path))
         self.assertSameImage(old_img, new_img)
 
     @on_all_images
     def test_overflow_tags(self, old_img, img_path):
-        tags = frozenset(str(x) * 10 for x in range(100))
+        tags = frozenset(str(x) * 10 for x in range(300))
         jfti.set_jpeg_tags(img_path, set(tags))
         new_tags = frozenset(jfti.read_jpeg_tags(img_path))
         self.assertEqual(tags, new_tags)
