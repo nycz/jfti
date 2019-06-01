@@ -132,12 +132,23 @@ def set_xmp_tags(raw_data: bytes, tags: Set[str]) -> bytes:
     if out_xml.endswith('?>'):
         start, end = out_xml.rsplit('<?', 1)
         end = '<?' + end
+    max_len = 65503
+    new_len = len(out_xml.encode())
+    padding_len = len(raw_data) - new_len
+    padding: str
+    if padding_len > 0:
+        padding = b''
+        for n in range(0, padding_len, 100):
+            padding += b'\n' + b' ' * 99
+    else:
+        padding = (20 * ('\n' + ' ' * 99)).encode()
+        if len(padding) + new_len > max_len:
+            padding_len = max_len - new_len
 
-    padding_len = max(0, len(raw_data) - len(out_xml.encode()))
-    padding = b''
-    for n in range(0, padding_len, 100):
-        padding += b'\n' + b' ' * 99
     out = start.encode() + padding[:padding_len] + end.encode()
+    if len(out) > max_len:
+        raise ImageError(f'New XMP length is too big ({new_len} > {max_len}, '
+                         f'extended XMP not yet supported')
     return out
 
 
@@ -326,7 +337,7 @@ def set_jpeg_tags(fname: Path, tags: Set[str]) -> None:
             new_data = JPEG_XMP_SIG + set_xmp_tags(data[len(JPEG_XMP_SIG):],
                                                    tags)
             if len(new_data) != len(data):
-                f.seek(start_pos)
+                f.seek(start_pos + len(data) + 2)
                 trailing_data = f.read()
                 f.seek(start_pos)
                 f.truncate()
@@ -336,8 +347,6 @@ def set_jpeg_tags(fname: Path, tags: Set[str]) -> None:
             elif new_data != data:
                 f.seek(start_pos + 2)
                 f.write(new_data)
-            else:
-                print('no change')
             return
         else:
             if last_exif_pos is not None:
@@ -345,7 +354,8 @@ def set_jpeg_tags(fname: Path, tags: Set[str]) -> None:
             elif first_sof_pos is not None:
                 start_pos = first_sof_pos
             else:
-                raise ImageError('Weird jpeg, can\'t find place to put XMP block')
+                raise ImageError('Weird jpeg, can\'t find place '
+                                 'to put XMP block')
             f.seek(start_pos)
             trailing_data = f.read()
             f.seek(start_pos)
@@ -489,7 +499,10 @@ def set_tags(fname: Path, tags: Set[str], safe: bool = True) -> None:
         set_tags_funcs[fmt](new_file, tags)
         # Get the data and check it
         new_meta = get_metadata(new_file)
-        new_image = get_pixeldata(new_file)
+        try:
+            new_image = get_pixeldata(new_file)
+        except OSError:
+            raise ImageError('couldnt read the new file!')
         if new_meta != old_meta:
             if sorted(new_meta) == sorted(old_meta):
                 raise ImageError('metadata out of order!')
@@ -554,7 +567,6 @@ def main() -> None:
         if not args.tag:
             raise argparse.ArgumentError('no tags specified (no you cant '
                                          'get rid of all of them yet)')
-        # print(set(args.tag))
         set_tags(path, set(args.tag))
 
 
