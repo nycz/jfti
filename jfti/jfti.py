@@ -500,6 +500,10 @@ def set_tags(fname: Path, tags: Set[str], safe: bool = True) -> None:
     if fmt is None:
         raise ImageError('unknown file format')
 
+    if not safe:
+        set_tags_funcs[fmt](fname, tags)
+        return
+
     old_meta = get_metadata(fname)
     old_image = get_pixeldata(fname)
 
@@ -568,6 +572,7 @@ def main() -> None:
     parser.add_argument('file')
     parser.add_argument('action', choices=('set', 'ls'))
     parser.add_argument('tag', nargs='*')
+    parser.add_argument('--unsafe', action='store_true')
     args = parser.parse_args()
     path = Path(args.file).expanduser()
     if args.action == 'ls':
@@ -578,7 +583,7 @@ def main() -> None:
         if not args.tag:
             raise argparse.ArgumentError('no tags specified (no you cant '
                                          'get rid of all of them yet)')
-        set_tags(path, set(args.tag))
+        set_tags(path, set(args.tag), safe=not args.unsafe)
 
 
 if __name__ == '__main__':
