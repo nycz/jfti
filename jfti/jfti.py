@@ -113,15 +113,26 @@ def set_xmp_tags(raw_data: bytes, tags: Set[str]) -> bytes:
     parent = xml
     for i in range(len(paths)):
         hits = xml.xpath('/' + '/'.join(paths[:i+1]), namespaces=NS)
+        target = paths[i]
         if len(hits) == 0:
-            target = paths[i]
             prefix, tag = target.split(':', 1)
             fullname = '{' + NS[prefix] + '}' + tag
             parent = etree.SubElement(parent, fullname)
             if target == 'rdf:Description' and len(desc_abouts) == 1:
                 parent.set(about_key, list(desc_abouts)[0])
         else:
-            parent = hits[0]
+            # Sometimes there's one Description tag for each namespace,
+            # and in that case we want to find the one with the dc namespace
+            if target == 'rdf:Description':
+                for hit in hits:
+                    if NS['dc'] in hit.nsmap.values():
+                        parent = hit
+                        break
+                else:
+                    parent = hits[0]
+            else:
+                parent = hits[0]
+
     parent.clear()
     for tag in sorted(tags):
         tag_elem = etree.SubElement(parent, rdf + 'li')
