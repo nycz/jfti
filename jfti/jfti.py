@@ -481,7 +481,8 @@ def set_tags(fname: Path, tags: Set[str], safe: bool = True) -> None:
         try:
             result = subprocess.run(['exiv2', '-p', 'a', str(path)],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    check=True, encoding='utf-8')
+                                    check=True, encoding='utf-8',
+                                    errors='backslashreplace')
         except subprocess.CalledProcessError as e:
             raise ImageError(f'running exiv2 failed!\nstdout: {e.stdout!r}'
                              f'\nstderr: {e.stderr!r}')

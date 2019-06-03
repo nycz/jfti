@@ -4,6 +4,7 @@ from PIL import Image
 import shutil
 import subprocess
 import tempfile
+from typing import List
 import unittest
 
 from jfti import jfti
@@ -15,6 +16,18 @@ def on_all_images(func):
             with self.subTest(i=n, name=img_path.name):
                 func(self, old_img, img_path)
     return wrapper
+
+
+def exiv(path: Path, arg: str) -> str:
+    data: str = subprocess.run(['exiv2', '-p', arg, str(path)],
+                               stdout=subprocess.PIPE, encoding='utf-8',
+                               errors='backslashreplace').stdout
+    return data
+
+
+def exiv_lines(path: Path, arg: str) -> List[str]:
+    return [x for x in exiv(path, arg).splitlines()
+            if not x.startswith('Xmp.dc.subject ')]
 
 
 TESTDATA_ROOT = Path('testdata')
@@ -152,38 +165,24 @@ class TestJPEG(unittest.TestCase):
 
     @on_all_images
     def test_remove_tags_check_exif(self, old_img, img_path):
-        old_data = subprocess.run(['exiv2', '-p', 'v', str(img_path)],
-                                  stdout=subprocess.PIPE).stdout
+        old_data = exiv(img_path, 'v')
         jfti.set_jpeg_tags(img_path, set())
-        new_data = subprocess.run(['exiv2', '-p', 'v', str(img_path)],
-                                  stdout=subprocess.PIPE).stdout
+        new_data = exiv(img_path, 'v')
         self.assertEqual(old_data, new_data)
 
     @on_all_images
     def test_change_tags_check_xmp(self, old_img, img_path):
         tags = frozenset({'tag1', 'tag2', 'tag3'})
-        old_data = subprocess.run(['exiv2', '-p', 'a', str(img_path)],
-                                  stdout=subprocess.PIPE, encoding='utf-8'
-                                  ).stdout.splitlines()
-        old_data = [x for x in old_data if not x.startswith('Xmp.dc.subject ')]
+        old_data = exiv_lines(img_path, 'a')
         jfti.set_jpeg_tags(img_path, set(tags))
-        new_data = subprocess.run(['exiv2', '-p', 'a', str(img_path)],
-                                  stdout=subprocess.PIPE, encoding='utf-8'
-                                  ).stdout.splitlines()
-        new_data = [x for x in new_data if not x.startswith('Xmp.dc.subject ')]
+        new_data = exiv_lines(img_path, 'a')
         self.assertEqual(old_data, new_data)
 
     @on_all_images
     def test_remove_tags_check_xmp(self, old_img, img_path):
-        old_data = subprocess.run(['exiv2', '-p', 'a', str(img_path)],
-                                  stdout=subprocess.PIPE, encoding='utf-8'
-                                  ).stdout.splitlines()
-        old_data = [x for x in old_data if not x.startswith('Xmp.dc.subject ')]
+        old_data = exiv_lines(img_path, 'a')
         jfti.set_jpeg_tags(img_path, set())
-        new_data = subprocess.run(['exiv2', '-p', 'a', str(img_path)],
-                                  stdout=subprocess.PIPE, encoding='utf-8'
-                                  ).stdout.splitlines()
-        new_data = [x for x in new_data if not x.startswith('Xmp.dc.subject ')]
+        new_data = exiv_lines(img_path, 'a')
         self.assertEqual(old_data, new_data)
 
     def tearDown(self):
