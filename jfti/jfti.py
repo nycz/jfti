@@ -42,6 +42,16 @@ class ImageFormat(enum.Enum):
     PNG = enum.auto()
 
 
+def image_format_mismatch(fname: Path, fmt: ImageFormat) -> bool:
+    ext = fname.suffix.lstrip('.').lower()
+    matches = {
+        ImageFormat.GIF: {'gif'},
+        ImageFormat.JPEG: {'jpg', 'jpeg'},
+        ImageFormat.PNG: {'png'},
+    }
+    return ext not in matches[fmt]
+
+
 def identify_image_format(fname: Path) -> Optional[ImageFormat]:
     with open(fname, 'rb') as f:
         data = f.read(8)
