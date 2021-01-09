@@ -503,47 +503,22 @@ def set_tags(fname: Path, tags: Set[str], safe: bool = True) -> None:
     def get_pixeldata(path: Path) -> List[Tuple[int, ...]]:
         return list(Image.open(str(path)).getdata())
 
-    set_tags_funcs = {
-        ImageFormat.PNG: set_png_tags,
-        ImageFormat.JPEG: set_jpeg_tags,
-    }
-    fmt = identify_image_format(fname)
-    if fmt is None:
-        raise ImageError('unknown file format')
-
-    if not safe:
-        set_tags_funcs[fmt](fname, tags)
+    tt = 'Xmp.dc.subject'
+    args = ['exiv2', '-M', f'del {tt}']
+    for tag in tags:
+        args.extend(['-M', f'set {tt} {tag}'])
+    args.append(str(fname))
+    try:
+        result = subprocess.check_output(args, stderr=subprocess.STDOUT,
+                                         encoding='utf-8')
+    except subprocess.CalledProcessError as e:
+        raise ImageError(f'running exiv2 failed on image {fname!r}!\n'
+                         f'stderr: {e.stderr!r}')
+    else:
+        if result:
+            print(f'\x1b[31mWarnings when tags added to file {fname!r}\x1b[0m')
+            print(result)
         return
-
-    old_meta = get_metadata(fname)
-    old_image = get_pixeldata(fname)
-
-    with tempfile.TemporaryDirectory(prefix='jfti-inprogress-') as tempdir:
-        # Copy file to safe temporary place
-        new_file = shutil.copy(str(fname), tempdir)
-        # Set the tags
-        set_tags_funcs[fmt](new_file, tags)
-        # Get the data and check it
-        new_meta = get_metadata(new_file)
-        try:
-            new_image = get_pixeldata(new_file)
-        except OSError:
-            raise ImageError('couldnt read the new file!')
-        if new_meta != old_meta:
-            if sorted(new_meta) == sorted(old_meta):
-                raise ImageError('metadata out of order!')
-            new_lines = set(new_meta) - set(old_meta)
-            dropped_lines = set(old_meta) - set(new_meta)
-            raise ImageError(f'metadata do not match!\n'
-                             f'added lines: {new_lines!r}\n'
-                             f'removed lines: {dropped_lines!r}')
-        if new_image != old_image:
-            print(list(new_image)[0])
-            print(type(list(new_image)[0]))
-            print(len(new_image))
-            print(len(old_image))
-            raise ImageError('pixel data do not match!')
-        shutil.copy(new_file, str(fname))
 
 
 def dimensions(fname: Path) -> Tuple[int, int]:
